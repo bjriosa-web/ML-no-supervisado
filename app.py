@@ -70,6 +70,48 @@ def fig_heat(L, feats):
 def top_var(R, pc):
     return R["loadings"][pc].abs().idxmax()
 
+def local_wine():
+    import os
+    d = os.path.dirname(os.path.abspath(__file__)); fr = []
+    for t in ("red", "white"):
+        p = os.path.join(d, f"winequality-{t}.csv")
+        if os.path.exists(p):
+            x = pd.read_csv(p, sep=";"); x["tipo"] = t; fr.append(x)
+    return pd.concat(fr, ignore_index=True) if fr else None
+
+def compute_pca(k):
+    P = SS["prep"]; maxk = min(len(SS["feats"]), len(P["X"]))
+    pca = PCA(n_components=maxk, random_state=0).fit(P["Xs"])
+    pcs = [f"PC{i+1}" for i in range(maxk)]
+    SS["res"] = dict(k=k, evr=pca.explained_variance_ratio_, eig=pca.explained_variance_,
+        loadings=pd.DataFrame(pca.components_.T * np.sqrt(pca.explained_variance_), index=SS["feats"], columns=pcs),
+        contrib=pd.DataFrame(pca.components_.T ** 2 * 100, index=SS["feats"], columns=pcs),
+        scores=pd.DataFrame(pca.transform(P["Xs"])[:, :k], columns=pcs[:k], index=P["X"].index),
+        cum_k=float(pca.explained_variance_ratio_[:k].sum() * 100))
+
+def auto_run():
+    """Carga el dataset y ejecuta preprocesamiento + PCA con valores por defecto (datos reales)."""
+    try:
+        if "df" not in SS:
+            d = local_wine()
+            if d is not None: SS["src"] = "Wine Quality – UCI ML Repository (archivos CSV del proyecto)"
+            else: d = download_wine("both").copy(); SS["src"] = "Wine Quality – UCI ML Repository (tinto + blanco, descarga automática)"
+            SS["df"] = d
+        df = SS["df"]
+        if "prep" not in SS:
+            label = "quality" if "quality" in df.columns else "(ninguna)"
+            feats = [c for c in df.select_dtypes("number").columns if c != label]
+            if len(feats) < 2: return
+            X = pd.DataFrame(SimpleImputer(strategy="median").fit_transform(df[feats]), columns=feats, index=df.index)
+            if (X.std() == 0).any(): return
+            SS.update(prep=dict(X=X, Xs=StandardScaler().fit_transform(X), label=label, std=True, imp="Imputar con mediana", dropped=0), feats=feats)
+            SS.pop("res", None)
+        if "res" not in SS:
+            ev = PCA(random_state=0).fit(SS["prep"]["Xs"]).explained_variance_ratio_
+            compute_pca(int(max(2, np.argmax(np.cumsum(ev) >= 0.8) + 1)))   # k mínimo que explica ≥80%
+    except Exception as e:
+        SS["load_err"] = str(e)
+
 # ---------- páginas ----------
 def go_to(p): SS["page"] = p
 
@@ -84,7 +126,13 @@ def page_inicio():
     c[2].metric("Variables en el análisis", len(SS["feats"]) if "prep" in SS else "—")
     c[3].metric("Varianza explicada", f"{R['cum_k']:.1f}%" if R else "—")
     st.write("")
-    st.button("🚀 Iniciar análisis", on_click=go_to, args=("2. Dataset",), type="primary")
+    st.button("🚀 Iniciar análisis", on_click=go_to, args=("5. Visualización",), type="primary")
+    if R:
+        st.success("Dataset cargado y PCA ejecutado automáticamente con datos reales. Resumen:")
+        for x in conclusions(): st.markdown(f"- {x}")
+        st.plotly_chart(fig_var(R["evr"], R["k"]), use_container_width=True)
+    elif SS.get("load_err"):
+        st.error(f"No se pudo cargar el dataset automáticamente ({SS['load_err']}). Ve a *Dataset* para cargar un CSV.")
     st.caption("Universidad Nacional de Trujillo · Ingeniería de Sistemas · Dataset: Wine Quality (UCI)")
 
 def page_dataset():
@@ -150,15 +198,8 @@ def page_pca():
     st.header("Reducción de dimensionalidad (PCA)")
     P = SS.get("prep"); need(P is not None, "Primero aplica el preprocesamiento.")
     n = len(SS["feats"]); maxk = min(n, len(P["X"]))
-    k = st.slider("Número de componentes principales", 2, maxk, min(2, maxk)) if maxk > 2 else 2
-    if st.button("Ejecutar PCA"):
-        pca = PCA(n_components=maxk, random_state=0).fit(P["Xs"])   # todas las componentes (para el gráfico de varianza)
-        sc = pca.transform(P["Xs"])[:, :k]
-        pcs = [f"PC{i+1}" for i in range(maxk)]
-        L = pd.DataFrame(pca.components_.T * np.sqrt(pca.explained_variance_), index=SS["feats"], columns=pcs)
-        contrib = pd.DataFrame(pca.components_.T ** 2 * 100, index=SS["feats"], columns=pcs)
-        SS["res"] = dict(k=k, evr=pca.explained_variance_ratio_, eig=pca.explained_variance_, loadings=L, contrib=contrib,
-            scores=pd.DataFrame(sc, columns=pcs[:k], index=P["X"].index), cum_k=float(pca.explained_variance_ratio_[:k].sum() * 100))
+    k = st.slider("Número de componentes principales", 2, maxk, SS["res"]["k"] if "res" in SS else min(2, maxk)) if maxk > 2 else 2
+    if st.button("Ejecutar PCA"): compute_pca(k)
     R = SS.get("res")
     if R:
         st.success(f"PCA ejecutado con {R['k']} componentes sobre {n} variables. Varianza explicada acumulada: **{R['cum_k']:.2f}%**")
@@ -264,5 +305,6 @@ def page_meto():
 
 PAGES = {"1. Inicio": page_inicio, "2. Dataset": page_dataset, "3. Preprocesamiento": page_prep, "4. Reducción de dimensionalidad": page_pca,
          "5. Visualización": page_viz, "6. Comparación de resultados": page_cmp, "7. Conclusiones": page_concl, "8. Metodología": page_meto}
+with st.spinner("Cargando dataset y ejecutando PCA..."): auto_run()
 st.sidebar.title("📉 DimensioVision AI"); st.sidebar.radio("Menú", list(PAGES), key="page")
 PAGES[SS["page"]]()
